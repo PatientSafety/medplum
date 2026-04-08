@@ -71,7 +71,7 @@ export const PatientPageTabs: PatientPageTabInfo[] = [
   },
   {
     id: 'devices',
-    url: 'Device?_fields=manufacturer,deviceName,status,distinctIdentifier,serialNumber&_offset=0&_sort=-_lastUpdated&patient=%patient.id',
+    url: 'devices',
     label: 'Devices',
   },
   {
