@@ -22,12 +22,32 @@ on:
 permissions:
   contents: read
 
+env:
+  # The branch that holds the code that ships, when it is not the default branch (empty = the
+  # triggering ref). Scheduled runs only start from the default branch, so this is how they reach it.
+  SCAN_REF: ""
+
 jobs:
   sbom-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SCAN_REF != '' && env.SCAN_REF || '' }}
+
+      - name: Resolve npm versions where no lock file is committed
+        run: |
+          # A package.json without a lock gives version ranges, not what is installed (anti-vaporware
+          # rule 6). Resolve a lock without running any install script; the summary says it was done.
+          for pj in $(find . -name package.json -not -path '*/node_modules/*' -not -path './.claude/*'); do
+            d=$(dirname "$pj")
+            if [ ! -f "$d/package-lock.json" ] && [ ! -f "$d/yarn.lock" ] && [ ! -f "$d/pnpm-lock.yaml" ]; then
+              echo "No lock in $d: resolving with npm install --package-lock-only --ignore-scripts"
+              (cd "$d" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)                 || echo "::warning::could not resolve a lock in $d"
+              echo "$d" >> resolved-locks.txt
+            fi
+          done
 
       - name: Install Syft and Grype
         run: |
@@ -60,7 +80,10 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## SBOM scan: ${{ github.event.repository.name }} @ ${GITHUB_SHA::8}"
+            echo "## SBOM scan: ${{ github.event.repository.name }} @ $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))"
+            if [ -f resolved-locks.txt ]; then
+              echo "Lock files resolved at scan time (no lock committed): $(paste -sd ' ' resolved-locks.txt). Versions are today's resolution, not necessarily what shipped."
+            fi
             echo "Components: $(jq '.components | length' out/sbom.cdx.json)"
             for s in Critical High Medium; do
               echo "- ${s}: $(jq --arg s "$s" '[.matches[] | select(.vulnerability.severity == $s)] | length' out/grype.json)"
