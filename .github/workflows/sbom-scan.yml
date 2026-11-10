@@ -1,0 +1,74 @@
+# sbom-scan: SBOM and vulnerability scan for this repo (Craig 2026-11-10: "an SBOM scan that runs is
+# better than broken scans that don't run").
+#
+# Language-neutral on purpose so it keeps running: Syft reads the repo's lock and manifest files
+# (resolved versions, not constraint ranges) into a CycloneDX SBOM, and Grype scans that SBOM.
+# Findings never fail the job: they are reported in the job summary and the artifact, and the daily
+# security-loop (PatientSafety/security-loop) watches that this workflow keeps running. A job that
+# fails here means the scan itself broke.
+#
+# Ephemeral tooling state is excluded (anti-vaporware rule 5): .claude/, node_modules/.cache/.
+
+name: sbom-scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, so the watchdog always sees a run within 8 days
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Syft and Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          syft version
+          grype version
+
+      - name: Generate CycloneDX SBOM (Syft, directory scan)
+        run: |
+          mkdir -p out
+          syft dir:. \
+            --exclude './.claude/**' --exclude './**/node_modules/.cache/**' --exclude './.git/**' \
+            -o cyclonedx-json=out/sbom.cdx.json
+          echo "Components: $(jq '.components | length' out/sbom.cdx.json)"
+
+      - name: Scan the SBOM (Grype; findings are reported, never fatal)
+        run: |
+          grype sbom:out/sbom.cdx.json -o json --file out/grype.json || true
+          test -s out/grype.json
+
+      - name: Upload SBOM and scan
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-scan-${{ github.event.repository.name }}-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 365
+
+      - name: Summary
+        run: |
+          {
+            echo "## SBOM scan: ${{ github.event.repository.name }} @ ${GITHUB_SHA::8}"
+            echo "Components: $(jq '.components | length' out/sbom.cdx.json)"
+            for s in Critical High Medium; do
+              echo "- ${s}: $(jq --arg s "$s" '[.matches[] | select(.vulnerability.severity == $s)] | length' out/grype.json)"
+            done
+            echo
+            echo "| Severity | Package | Installed | Fixed in | ID |"
+            echo "|---|---|---|---|---|"
+            jq -r '.matches[] | select(.vulnerability.severity == "Critical" or .vulnerability.severity == "High")
+                   | "| \(.vulnerability.severity) | \(.artifact.name) | \(.artifact.version) | \((.vulnerability.fix.versions // []) | join(", ")) | \(.vulnerability.id) |"' \
+              out/grype.json | sort -u | head -50
+          } >> "$GITHUB_STEP_SUMMARY"
