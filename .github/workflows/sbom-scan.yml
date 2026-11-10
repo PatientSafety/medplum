@@ -42,7 +42,14 @@ jobs:
           # rule 6). Resolve a lock without running any install script; the summary says it was done.
           for pj in $(find . -name package.json -not -path '*/node_modules/*' -not -path './.claude/*'); do
             d=$(dirname "$pj")
-            if [ ! -f "$d/package-lock.json" ] && [ ! -f "$d/yarn.lock" ] && [ ! -f "$d/pnpm-lock.yaml" ]; then
+            # A lock in this folder or any parent (an npm workspace root) already covers it.
+            covered=""; up="$d"
+            while :; do
+              if [ -f "$up/package-lock.json" ] || [ -f "$up/yarn.lock" ] || [ -f "$up/pnpm-lock.yaml" ]; then covered=1; break; fi
+              [ "$up" = "." ] && break
+              up=$(dirname "$up")
+            done
+            if [ -z "$covered" ]; then
               echo "No lock in $d: resolving with npm install --package-lock-only --ignore-scripts"
               (cd "$d" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)                 || echo "::warning::could not resolve a lock in $d"
               echo "$d" >> resolved-locks.txt
